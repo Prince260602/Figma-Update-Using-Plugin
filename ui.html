@@ -1,0 +1,211 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Excel Price Updater</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 12px; }
+    h2 { margin: 4px 0 8px; font-size: 16px; }
+    label { display:block; margin: 8px 0 6px; font-weight: 600; font-size: 13px;}
+    input[type="file"] { display:block; }
+    .btn { display:inline-block; margin-top: 10px; padding: 8px 12px; border-radius:6px; border:1px solid #ccc; cursor:pointer; background:#f5f5f5; }
+    .btn-primary { background:#2563eb; color: white; border: none; }
+    #status { margin-top: 10px; font-size: 13px; color: #333; }
+    #notfound { margin-top: 8px; color:#a33; font-size:13px; }
+    #exportPreview { margin-top: 12px; max-width:100%; border:1px solid #ddd; }
+    footer { margin-top: 14px; font-size: 12px; color:#666; }
+    .row { display:flex; gap:8px; align-items:center; margin-top:8px; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <h2>Excel Price Updater — Product Name + Price (₹)</h2>
+
+  <label for="excelFile">Choose Excel file (.xlsx / .xls)</label>
+  <input id="excelFile" type="file" accept=".xlsx,.xls,.csv" />
+
+  <div class="row">
+    <button id="loadPreview" class="btn">Load & Preview</button>
+    <button id="applyBtn" class="btn btn-primary">Upload to Figma (Update Prices)</button>
+    <button id="exportBtn" class="btn">Export Table as PNG</button>
+  </div>
+
+  <div id="status">Status: waiting for file...</div>
+  <div id="notfound"></div>
+
+  <div id="previewContainer"></div>
+  <img id="exportPreview" style="display:none;" />
+
+  <footer>
+    • The plugin tries to match product names exactly (case-insensitive). If no selection is made, it searches the page for matching product names.<br>
+    • Make sure your Product Name text nodes exactly match the names in Excel, or appear as whole words inside the text node.
+  </footer>
+
+<script>
+ 
+  window.onmessage = (e) => {
+   
+  };
+
+  function postToPlugin(msg) {
+    parent.postMessage({ pluginMessage: msg }, "*");
+  }
+
+  window.addEventListener("message", (e) => {
+    const msg = e.data.pluginMessage;
+    if (!msg) return;
+
+    if (msg.type === "status") {
+      setStatus(msg.text);
+    } else if (msg.type === "update-complete") {
+      let t = `Updated ${msg.updates} price node(s).`;
+      if (msg.notFound && msg.notFound.length) {
+        t += ` Not found: ${msg.notFound.join(", ")}`;
+        document.getElementById("notfound").textContent = "Not found: " + msg.notFound.join(", ");
+      } else {
+        document.getElementById("notfound").textContent = "";
+      }
+      setStatus(t);
+    } else if (msg.type === "export-ready") {
+      const b64 = msg.data;
+      const img = document.getElementById("exportPreview");
+      img.src = "data:image/png;base64," + b64;
+      img.style.display = "block";
+
+      const link = document.createElement("a");
+      link.href = img.src;
+      link.download = "table-export.png";
+      link.textContent = "Download exported PNG";
+      link.style.display = "inline-block";
+      link.style.marginTop = "8px";
+      const c = document.getElementById("previewContainer");
+      c.innerHTML = "";
+      c.appendChild(link);
+      setStatus("Export ready. Preview shown and download link created.");
+    } else if (msg.type === "export-failed") {
+      setStatus("Export failed: " + msg.text);
+    }
+  });
+
+  function setStatus(t) {
+    document.getElementById("status").textContent = "Status: " + t;
+  }
+
+  function parseExcelFile(file, callback) {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const data = ev.target.result;
+      let workbook;
+      try {
+        workbook = XLSX.read(data, { type: "binary" });
+      } catch (err) {
+        setStatus("Failed to read file: " + err.message);
+        return;
+      }
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+      const json = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+      callback(json);
+    };
+    reader.onerror = (err) => {
+      setStatus("File read error: " + err);
+    };
+  
+    reader.readAsBinaryString(file);
+  }
+
+  function sheetRowsToMapping(rows) {
+    
+    if (!Array.isArray(rows)) return {};
+    if (rows.length === 0) return {};
+    const first = rows[0];
+    const headers = Object.keys(first);
+    let productHeader = null;
+    let priceHeader = null;
+    for (const h of headers) {
+      const lh = h.toLowerCase();
+      if (!productHeader && lh.includes("product")) productHeader = h;
+      if (!priceHeader && (lh.includes("price") || lh.includes("₹") || lh.includes("rupee") || lh.includes("rs"))) priceHeader = h;
+    }
+   
+    if (!productHeader) productHeader = headers[0];
+    if (!priceHeader) priceHeader = headers[1] || headers[0];
+
+    const mapping = {};
+    for (const row of rows) {
+      const p = (row[productHeader] !== undefined && row[productHeader] !== null) ? String(row[productHeader]).trim() : "";
+      let pr = (row[priceHeader] !== undefined && row[priceHeader] !== null) ? String(row[priceHeader]).trim() : "";
+      
+      pr = pr.replace(/[^0-9.,-]/g, "").replace(",", "");
+      if (p) mapping[p] = pr;
+    }
+    return mapping;
+  }
+
+ 
+  const fileInput = document.getElementById("excelFile");
+  let lastMapping = null;
+
+  document.getElementById("loadPreview").addEventListener("click", () => {
+    const f = fileInput.files[0];
+    if (!f) { setStatus("Choose an Excel file first."); return; }
+    parseExcelFile(f, (rows) => {
+      const mapping = sheetRowsToMapping(rows);
+      lastMapping = mapping;
+     
+      const c = document.getElementById("previewContainer");
+      c.innerHTML = "";
+      const table = document.createElement("table");
+      table.style.borderCollapse = "collapse";
+      table.style.width = "100%";
+      const header = document.createElement("tr");
+      header.innerHTML = "<th style='text-align:left;padding:6px;border-bottom:1px solid #ddd'>Product</th><th style='text-align:left;padding:6px;border-bottom:1px solid #ddd'>Price</th>";
+      table.appendChild(header);
+      for (const k of Object.keys(mapping)) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td style='padding:6px;border-bottom:1px solid #fafafa'>${k}</td><td style='padding:6px;border-bottom:1px solid #fafafa'>₹${mapping[k]}</td>`;
+        table.appendChild(tr);
+      }
+      c.appendChild(table);
+      setStatus("Preview loaded. Click 'Upload to Figma' to update prices.");
+    });
+  });
+
+  document.getElementById("applyBtn").addEventListener("click", () => {
+    const f = fileInput.files[0];
+    if (!f && !lastMapping) { setStatus("Choose an Excel file first."); return; }
+    if (!lastMapping) {
+     
+      parseExcelFile(f, (rows) => {
+        const mapping = sheetRowsToMapping(rows);
+        lastMapping = mapping;
+        postToPlugin({ type: "update-prices", data: mapping });
+        setStatus("Sent data to plugin for updating...");
+      });
+    } else {
+      postToPlugin({ type: "update-prices", data: lastMapping });
+      setStatus("Sent data to plugin for updating...");
+    }
+  });
+
+  document.getElementById("exportBtn").addEventListener("click", () => {
+  
+    postToPlugin({ type: "export-png" });
+    setStatus("Requested export from plugin...");
+  });
+
+  document.body.addEventListener("dragover", (e) => { e.preventDefault(); });
+  document.body.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const dt = e.dataTransfer;
+    if (dt && dt.files && dt.files.length) {
+      fileInput.files = dt.files;
+      setStatus("File ready (dropped). Click Load & Preview.");
+    }
+  });
+
+  postToPlugin({ type: "ping" });
+</script>
+</body>
+</html>

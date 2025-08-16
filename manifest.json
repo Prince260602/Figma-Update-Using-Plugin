@@ -1,0 +1,9 @@
+{
+  "name": "Excel Price Updater & Exporter",
+  "id": "excel-price-updater-exporter",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "permissions": []
+}
